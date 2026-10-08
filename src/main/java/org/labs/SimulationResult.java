@@ -8,6 +8,8 @@ public record SimulationResult(
         List<Integer> eatenByProgrammer,
         long durationMs
 ) {
+    private static final int INDIVIDUAL_RESULTS_LIMIT = 1000;
+
     public int totalEaten() {
         return eatenByProgrammer.stream().mapToInt(Integer::intValue).sum();
     }
@@ -25,8 +27,15 @@ public record SimulationResult(
     public void printSummary() {
         System.out.println();
         System.out.println("=== Обед завершён ===");
-        for (int id = 0; id < eatenByProgrammer.size(); id++) {
-            System.out.printf("Программист %d съел порций: %d%n", id, eatenByProgrammer.get(id));
+        if (eatenByProgrammer.size() <= INDIVIDUAL_RESULTS_LIMIT) {
+            for (int id = 0; id < eatenByProgrammer.size(); id++) {
+                System.out.printf("Программист %d съел порций: %d%n", id, eatenByProgrammer.get(id));
+            }
+        } else {
+            System.out.printf(
+                    "Индивидуальная статистика скрыта для %,d программистов.%n",
+                    eatenByProgrammer.size()
+            );
         }
         System.out.println("Всего было порций: " + initialPortions);
         System.out.println("Всего съедено: " + totalEaten());

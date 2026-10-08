@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DiningSimulationTest {
     @Test
     void consumesAllFoodAndDistributesItFairly() {
-        SimulationConfig config = new SimulationConfig(7, 2, 1_003, 0, 0, false);
+        SimulationConfig config = new SimulationConfig(7, 2, 1003, 0, 0, false);
 
         SimulationResult result = assertTimeoutPreemptively(
                 Duration.ofSeconds(5),
@@ -46,6 +46,20 @@ class DiningSimulationTest {
         );
 
         assertEquals(31, result.totalEaten());
+        assertTrue(result.differenceBetweenMostAndLeastFed() <= 1);
+    }
+
+    @Test
+    void supportsOneHundredThousandConcurrentParticipants() {
+        SimulationConfig config = new SimulationConfig(99900, 100, 1000, 0, 0, false);
+
+        SimulationResult result = assertTimeoutPreemptively(
+                Duration.ofSeconds(30),
+                () -> new DiningSimulation(config).run()
+        );
+
+        assertEquals(1000, result.totalEaten());
+        assertEquals(0, result.remainingPortions());
         assertTrue(result.differenceBetweenMostAndLeastFed() <= 1);
     }
 }

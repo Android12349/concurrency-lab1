@@ -2,6 +2,11 @@ package org.labs;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
 
 public final class DiningSimulation {
     private final SimulationConfig config;
@@ -17,15 +22,26 @@ public final class DiningSimulation {
 
         List<Spoon> spoons = createSpoons();
         List<Programmer> programmers = createProgrammers(spoons, orderDesk, logger);
-        List<Thread> waiterThreads = createWaiterThreads(orderDesk, logger);
-        List<Thread> programmerThreads = createProgrammerThreads(programmers);
+        ExecutorService waiterExecutor = createVirtualExecutor("Официант-");
+        ExecutorService programmerExecutor = createVirtualExecutor("Программист-");
+        List<Future<?>> waiterTasks = new ArrayList<>();
+        List<Future<?>> programmerTasks = new ArrayList<>();
 
-        waiterThreads.forEach(Thread::start);
-        programmerThreads.forEach(Thread::start);
-
-        joinAll(programmerThreads);
-        orderDesk.close();
-        joinAll(waiterThreads);
+        try {
+            submitWaiters(waiterExecutor, orderDesk, logger, waiterTasks);
+            submitProgrammers(programmerExecutor, programmers, programmerTasks);
+            waitForAll(programmerTasks);
+            orderDesk.close();
+            waitForAll(waiterTasks);
+        } finally {
+            orderDesk.close();
+            cancelAll(programmerTasks);
+            cancelAll(waiterTasks);
+            programmerExecutor.shutdownNow();
+            waiterExecutor.shutdownNow();
+            programmerExecutor.close();
+            waiterExecutor.close();
+        }
 
         long durationMs = (System.nanoTime() - startedAt) / 1000000;
         List<Integer> eatenPortions = programmers.stream()
@@ -71,31 +87,48 @@ public final class DiningSimulation {
         return programmers;
     }
 
-    private List<Thread> createWaiterThreads(OrderDesk orderDesk, SimulationLogger logger) {
-        List<Thread> threads = new ArrayList<>();
+    private ExecutorService createVirtualExecutor(String threadNamePrefix) {
+        ThreadFactory threadFactory = Thread.ofVirtual()
+                .name(threadNamePrefix, 0)
+                .factory();
+        return Executors.newThreadPerTaskExecutor(threadFactory);
+    }
+
+    private void submitWaiters(
+            ExecutorService executor,
+            OrderDesk orderDesk,
+            SimulationLogger logger,
+            List<Future<?>> tasks
+    ) {
         for (int id = 0; id < config.waiterCount(); id++) {
-            threads.add(new Thread(new Waiter(id, orderDesk, logger), "Официант-" + id));
+            tasks.add(executor.submit(new Waiter(id, orderDesk, logger)));
         }
-        return threads;
     }
 
-    private List<Thread> createProgrammerThreads(List<Programmer> programmers) {
-        List<Thread> threads = new ArrayList<>();
-        for (int id = 0; id < programmers.size(); id++) {
-            threads.add(new Thread(programmers.get(id), "Программист-" + id));
+    private void submitProgrammers(
+            ExecutorService executor,
+            List<Programmer> programmers,
+            List<Future<?>> tasks
+    ) {
+        for (Programmer programmer : programmers) {
+            tasks.add(executor.submit(programmer));
         }
-        return threads;
     }
 
-    private void joinAll(List<Thread> threads) {
-        for (Thread thread : threads) {
+    private void waitForAll(List<Future<?>> tasks) {
+        for (Future<?> task : tasks) {
             try {
-                thread.join();
+                task.get();
             } catch (InterruptedException exception) {
-                threads.forEach(Thread::interrupt);
                 Thread.currentThread().interrupt();
-                throw new IllegalStateException("Ожидание потоков было прервано", exception);
+                throw new IllegalStateException("Ожидание задач было прервано", exception);
+            } catch (ExecutionException exception) {
+                throw new IllegalStateException("Одна из задач завершилась с ошибкой", exception.getCause());
             }
         }
+    }
+
+    private void cancelAll(List<Future<?>> tasks) {
+        tasks.forEach(task -> task.cancel(true));
     }
 }
