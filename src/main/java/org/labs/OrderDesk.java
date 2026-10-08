@@ -1,6 +1,7 @@
 package org.labs;
 
 import java.util.Arrays;
+import java.util.Optional;
 
 public final class OrderDesk {
     private final ServingRequest[] pendingRequests;
@@ -29,30 +30,19 @@ public final class OrderDesk {
         notify();
     }
 
-    public synchronized ServingTask takeNext() throws InterruptedException {
-        while (true) {
-            if (closed) {
-                return null;
-            }
-
-            if (remainingPortions == 0) {
-                if (pendingRequestCount > 0) {
-                    ServingRequest request = takeAnyPendingRequest();
-                    return new ServingTask(request, false, 0);
-                }
-            } else {
-                ServingRequest request = pendingRequests[nextProgrammerId];
-                if (request != null) {
-                    pendingRequests[nextProgrammerId] = null;
-                    pendingRequestCount--;
-                    remainingPortions--;
-                    nextProgrammerId = (nextProgrammerId + 1) % pendingRequests.length;
-                    return new ServingTask(request, true, remainingPortions);
-                }
-            }
-
+    public synchronized Optional<ServingTask> awaitNextTask() throws InterruptedException {
+        while (!closed && !hasServiceableRequest()) {
             wait();
         }
+
+        if (closed) {
+            return Optional.empty();
+        }
+
+        ServingTask task = remainingPortions > 0
+                ? serveNextProgrammer()
+                : rejectPendingRequest();
+        return Optional.of(task);
     }
 
     public synchronized int remainingPortions() {
@@ -67,6 +57,29 @@ public final class OrderDesk {
         Arrays.fill(pendingRequests, null);
         pendingRequestCount = 0;
         notifyAll();
+    }
+
+    private boolean hasServiceableRequest() {
+        if (remainingPortions == 0) {
+            return pendingRequestCount > 0;
+        }
+
+        return pendingRequests[nextProgrammerId] != null;
+    }
+
+    private ServingTask serveNextProgrammer() {
+        ServingRequest request = pendingRequests[nextProgrammerId];
+        pendingRequests[nextProgrammerId] = null;
+        pendingRequestCount--;
+        remainingPortions--;
+        nextProgrammerId = (nextProgrammerId + 1) % pendingRequests.length;
+
+        return new ServingTask(request, true, remainingPortions);
+    }
+
+    private ServingTask rejectPendingRequest() {
+        ServingRequest request = takeAnyPendingRequest();
+        return new ServingTask(request, false, 0);
     }
 
     private ServingRequest takeAnyPendingRequest() {

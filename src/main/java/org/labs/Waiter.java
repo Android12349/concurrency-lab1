@@ -1,5 +1,7 @@
 package org.labs;
 
+import java.util.Optional;
+
 public final class Waiter implements Runnable {
     private final int id;
     private final OrderDesk orderDesk;
@@ -17,10 +19,11 @@ public final class Waiter implements Runnable {
 
         try {
             while (!Thread.currentThread().isInterrupted()) {
-                OrderDesk.ServingTask task = orderDesk.takeNext();
-                if (task == null) {
+                Optional<OrderDesk.ServingTask> nextTask = orderDesk.awaitNextTask();
+                if (nextTask.isEmpty()) {
                     break;
                 }
+                OrderDesk.ServingTask task = nextTask.get();
 
                 if (task.portionAvailable()) {
                     logger.log("Официант " + id + " принёс порцию программисту " + task.request().programmerId() + ". Осталось порций: " + task.remainingPortions());
