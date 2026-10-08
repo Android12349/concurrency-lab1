@@ -1,100 +1,148 @@
 package org.labs;
 
-import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public final class OrderDesk {
-    private final ServingRequest[] pendingRequests;
-    private int remainingPortions;
-    private int nextProgrammerId;
-    private int pendingRequestCount;
-    private int requestSearchStartIndex;
+    private static final ServingRequest SHUTDOWN_SIGNAL = new ServingRequest(-1);
+
+    private final BlockingQueue<ServingRequest> pendingRequests = new LinkedBlockingQueue<>();
+    private final Set<Integer> programmersWithPendingRequest = ConcurrentHashMap.newKeySet();
+    private final AtomicInteger remainingPortions;
+    private final AtomicIntegerArray remainingQuotaByProgrammer;
+    private final int waiterCount;
+    private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock();
+    private final Lock operationLock = lifecycleLock.readLock();
+    private final Lock closeLock = lifecycleLock.writeLock();
+
     private boolean closed;
 
-    public OrderDesk(int programmerCount, int totalPortions) {
-        this.pendingRequests = new ServingRequest[programmerCount];
-        this.remainingPortions = totalPortions;
+    public OrderDesk(int programmerCount, int waiterCount, int totalPortions) {
+        this.waiterCount = waiterCount;
+        this.remainingPortions = new AtomicInteger(totalPortions);
+        this.remainingQuotaByProgrammer = createFairQuotas(programmerCount, totalPortions);
     }
 
-    public synchronized void submit(ServingRequest request) {
-        if (closed) {
-            request.complete(false);
-            return;
-        }
-        if (pendingRequests[request.programmerId()] != null) {
-            throw new IllegalStateException("У программиста уже есть необработанный заказ");
-        }
+    public void submit(ServingRequest request) {
+        validateProgrammerId(request.programmerId());
 
-        pendingRequests[request.programmerId()] = request;
-        pendingRequestCount++;
-        notify();
+        operationLock.lock();
+        try {
+            if (closed) {
+                request.complete(false);
+                return;
+            }
+            if (!programmersWithPendingRequest.add(request.programmerId())) {
+                throw new IllegalStateException("У программиста уже есть необработанный заказ");
+            }
+
+            pendingRequests.add(request);
+        } finally {
+            operationLock.unlock();
+        }
     }
 
-    public synchronized Optional<ServingTask> awaitNextTask() throws InterruptedException {
-        while (!closed && !hasServiceableRequest()) {
-            wait();
-        }
-
-        if (closed) {
+    public Optional<ServingTask> awaitNextTask() throws InterruptedException {
+        ServingRequest request = pendingRequests.take();
+        if (request == SHUTDOWN_SIGNAL) {
             return Optional.empty();
         }
 
-        ServingTask task = remainingPortions > 0
-                ? serveNextProgrammer()
-                : rejectPendingRequest();
-        return Optional.of(task);
-    }
+        operationLock.lock();
+        try {
+            programmersWithPendingRequest.remove(request.programmerId());
 
-    public synchronized int remainingPortions() {
-        return remainingPortions;
-    }
+            if (closed) {
+                return Optional.of(new ServingTask(request, false, remainingPortions.get()));
+            }
 
-    public synchronized void close() {
-        closed = true;
-        Arrays.stream(pendingRequests)
-                .filter(request -> request != null)
-                .forEach(request -> request.complete(false));
-        Arrays.fill(pendingRequests, null);
-        pendingRequestCount = 0;
-        notifyAll();
-    }
-
-    private boolean hasServiceableRequest() {
-        if (remainingPortions == 0) {
-            return pendingRequestCount > 0;
+            int portionsLeft = reservePortion(request.programmerId());
+            boolean portionAvailable = portionsLeft >= 0;
+            int displayedRemainingPortions = portionAvailable
+                    ? portionsLeft
+                    : remainingPortions.get();
+            return Optional.of(new ServingTask(
+                    request,
+                    portionAvailable,
+                    displayedRemainingPortions
+            ));
+        } finally {
+            operationLock.unlock();
         }
-
-        return pendingRequests[nextProgrammerId] != null;
     }
 
-    private ServingTask serveNextProgrammer() {
-        ServingRequest request = pendingRequests[nextProgrammerId];
-        pendingRequests[nextProgrammerId] = null;
-        pendingRequestCount--;
-        remainingPortions--;
-        nextProgrammerId = (nextProgrammerId + 1) % pendingRequests.length;
-
-        return new ServingTask(request, true, remainingPortions);
+    public int remainingPortions() {
+        return remainingPortions.get();
     }
 
-    private ServingTask rejectPendingRequest() {
-        ServingRequest request = takeAnyPendingRequest();
-        return new ServingTask(request, false, 0);
+    public void close() {
+        closeLock.lock();
+        try {
+            if (closed) {
+                return;
+            }
+            closed = true;
+
+            List<ServingRequest> abandonedRequests = new ArrayList<>();
+            pendingRequests.drainTo(abandonedRequests);
+            abandonedRequests.forEach(request -> request.complete(false));
+            programmersWithPendingRequest.clear();
+
+            for (int index = 0; index < waiterCount; index++) {
+                pendingRequests.add(SHUTDOWN_SIGNAL);
+            }
+        } finally {
+            closeLock.unlock();
+        }
     }
 
-    private ServingRequest takeAnyPendingRequest() {
-        for (int offset = 0; offset < pendingRequests.length; offset++) {
-            int index = (requestSearchStartIndex + offset) % pendingRequests.length;
-            if (pendingRequests[index] != null) {
-                ServingRequest request = pendingRequests[index];
-                pendingRequests[index] = null;
-                pendingRequestCount--;
-                requestSearchStartIndex = (index + 1) % pendingRequests.length;
-                return request;
+    private int reservePortion(int programmerId) {
+        while (true) {
+            int currentQuota = remainingQuotaByProgrammer.get(programmerId);
+            if (currentQuota == 0) {
+                return -1;
+            }
+
+            if (remainingQuotaByProgrammer.compareAndSet(
+                    programmerId,
+                    currentQuota,
+                    currentQuota - 1
+            )) {
+                int portionsLeft = remainingPortions.decrementAndGet();
+                if (portionsLeft < 0) {
+                    throw new IllegalStateException("Остаток еды не может быть отрицательным");
+                }
+                return portionsLeft;
             }
         }
+    }
 
-        throw new IllegalStateException("Счётчик заказов не совпадает с содержимым очереди");
+    private void validateProgrammerId(int programmerId) {
+        if (programmerId < 0 || programmerId >= remainingQuotaByProgrammer.length()) {
+            throw new IllegalArgumentException("Неизвестный идентификатор программиста: " + programmerId);
+        }
+    }
+
+    private AtomicIntegerArray createFairQuotas(int programmerCount, int totalPortions) {
+        AtomicIntegerArray quotas = new AtomicIntegerArray(programmerCount);
+        int baseQuota = totalPortions / programmerCount;
+        int extraPortions = totalPortions % programmerCount;
+
+        for (int programmerId = 0; programmerId < programmerCount; programmerId++) {
+            int quota = baseQuota + (programmerId < extraPortions ? 1 : 0);
+            quotas.set(programmerId, quota);
+        }
+
+        return quotas;
     }
 
     public record ServingTask(

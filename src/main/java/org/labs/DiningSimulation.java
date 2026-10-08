@@ -18,7 +18,11 @@ public final class DiningSimulation {
     public SimulationResult run() {
         long startedAt = System.nanoTime();
         SimulationLogger logger = new SimulationLogger(config.detailedLogging());
-        OrderDesk orderDesk = new OrderDesk(config.programmerCount(), config.totalPortions());
+        OrderDesk orderDesk = new OrderDesk(
+                config.programmerCount(),
+                config.waiterCount(),
+                config.totalPortions()
+        );
 
         List<Spoon> spoons = createSpoons();
         List<Programmer> programmers = createProgrammers(spoons, orderDesk, logger);

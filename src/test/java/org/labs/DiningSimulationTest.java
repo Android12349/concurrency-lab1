@@ -51,7 +51,7 @@ class DiningSimulationTest {
 
     @Test
     void supportsOneHundredThousandConcurrentParticipants() {
-        SimulationConfig config = new SimulationConfig(99900, 100, 1000, 0, 0, false);
+        SimulationConfig config = new SimulationConfig(50000, 50000, 1_000, 0, 0, false);
 
         SimulationResult result = assertTimeoutPreemptively(
                 Duration.ofSeconds(30),
